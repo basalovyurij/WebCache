@@ -1,6 +1,5 @@
 package org.webcache.core;
 
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import org.webcache.thrift.SiteInfo;
@@ -11,15 +10,11 @@ import org.webcache.thrift.SiteInfo;
  */
 public interface DataProvider {
     Map<String, SiteInfo> getSites();
+    List<String> getSitesToCrawl();
     SiteInfo getSite(String domain);
-    void createSite(String domain, SiteInfo info);
+    void createOrReplaceSite(String domain, SiteInfo info);
     List<String> getPages(String domain);
-    int getPageCount();
-    Map<String, Date> getPagesLastCrawlDate(int skip, int limit);
-    PageInfo getPageInfo(String url);
-    void createPage(String url, PageInfo info);
+    void addPages(String domain, List<String> pages);
     String getPageText(String url);
-    void setPageText(String url, String text);
-    void setPageState(String url, PageCrawlState state);
-    void setPageError(String url, String error);
+    void setPageText(String url, String text);;
 }

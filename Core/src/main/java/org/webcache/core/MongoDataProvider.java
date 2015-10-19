@@ -7,18 +7,15 @@ import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
 import com.mongodb.client.model.Projections;
 import com.mongodb.client.model.UpdateOptions;
-import java.net.URISyntaxException;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import org.apache.commons.lang.time.DateUtils;
+import java.util.stream.Collectors;
 import org.bson.Document;
+import org.webcache.thrift.CrawlState;
 import org.webcache.thrift.SiteInfo;
 
 /**
@@ -28,7 +25,6 @@ import org.webcache.thrift.SiteInfo;
 public class MongoDataProvider implements DataProvider {
 
     private final MongoCollection sitesInfo;
-    private final MongoCollection pagesInfo;
     private final MongoCollection sitesPages;
     private final MongoCollection pagesTexts;
 
@@ -37,13 +33,12 @@ public class MongoDataProvider implements DataProvider {
         MongoDatabase database = client.getDatabase("WebCache");
 
         sitesInfo = database.getCollection("sites_info");
-        pagesInfo = database.getCollection("pages_info");
         sitesPages = database.getCollection("sites_pages");
         pagesTexts = database.getCollection("pages_texts");
     }
 
     @Override
-    public final Map<String, SiteInfo> getSites() {
+    public Map<String, SiteInfo> getSites() {
         Map<String, SiteInfo> res = new HashMap<>();
 
         try (MongoCursor<Document> cursor = sitesInfo.find().iterator()) {
@@ -51,6 +46,25 @@ public class MongoDataProvider implements DataProvider {
                 Document doc = cursor.next();
 
                 res.put(doc.getString("domain"), extractSite(doc));
+            }
+        }
+
+        return res;
+    }
+
+    @Override
+    public List<String> getSitesToCrawl() {
+        List<String> res = new LinkedList<>();
+
+        try (MongoCursor<Document> cursor = sitesInfo.find(
+                Filters.and(
+                        Filters.eq("crawlState", CrawlState.OK.getValue()),
+                        Filters.lt("nextCrawlDate", new Date())))
+                .projection(Projections.include("domain"))
+                .iterator()) {
+            while (cursor.hasNext()) {
+                Document doc = cursor.next();
+                res.add(doc.getString("domain"));
             }
         }
 
@@ -82,28 +96,38 @@ public class MongoDataProvider implements DataProvider {
         if (doc.containsKey("timeout")) {
             info.setTimeout(doc.getInteger("timeout"));
         }
-
+        if (doc.containsKey("nextCrawlDate")) {
+            info.setNextCrawlDateL(doc.getDate("nextCrawlDate").getTime());
+        }
+        if (doc.containsKey("crawlState")) {
+            info.setCrawlState(CrawlState.findByValue(doc.getInteger("crawlState")));
+        }
+        
         return info;
     }
 
     @Override
-    public void createSite(String domain, SiteInfo info) {
-        String robotsTxtUrl = "http://" + domain + "/robots.txt";
-
+    public void createOrReplaceSite(String domain, SiteInfo info) {
         Document doc = new Document("domain", domain)
+                .append("nextCrawlDate", new Date(info.getNextCrawlDateL()))
                 .append("refreshInterval", info.getRefreshInterval())
                 .append("maxDepth", info.getMaxDepth())
                 .append("pageLimit", info.getPageLimit())
-                .append("timeout", info.getTimeout());
+                .append("timeout", info.getTimeout())
+                .append("crawlState", CrawlState.OK.getValue());
 
-        sitesInfo.insertOne(doc);
+        sitesInfo.replaceOne(
+                new Document("domain", domain),
+                doc,
+                new UpdateOptions().upsert(true));
 
         doc = new Document("domain", domain)
-                .append("pages", Arrays.asList(robotsTxtUrl));
+                .append("pages", new LinkedList<>());
 
-        sitesPages.insertOne(doc);
-
-        createPage(robotsTxtUrl, new PageInfo(new Date(100, 0, 1), PageCrawlState.OK));
+        sitesPages.replaceOne(
+                new Document("domain", domain),
+                doc,
+                new UpdateOptions().upsert(true));
     }
 
     @Override
@@ -119,58 +143,14 @@ public class MongoDataProvider implements DataProvider {
     }
 
     @Override
-    public int getPageCount() {
-        return (int) pagesInfo.count();
-    }
+    public void addPages(String domain, List<String> pages) {
+        pages.addAll(getPages(domain));
+        List<String> newPages = pages.stream().distinct().collect(Collectors.toList());
 
-    @Override
-    public Map<String, Date> getPagesLastCrawlDate(int skip, int limit) {
-        Map<String, Date> res = new HashMap<>();
-
-        try (MongoCursor<Document> cursor = pagesInfo
-                .find(Filters.eq("state", PageCrawlState.OK.getValue()))
-                .skip(skip)
-                .limit(limit)
-                .projection(Projections.include("url", "lastCrawlDate"))
-                .iterator()) {
-            while (cursor.hasNext()) {
-                Document doc = cursor.next();
-                res.put(doc.getString("url"), doc.getDate("lastCrawlDate"));
-            }
-        }
-
-        return res;
-    }
-
-    @Override
-    public PageInfo getPageInfo(String url) {
-        try (MongoCursor<Document> cursor = pagesInfo
-                .find(Filters.eq("url", url))
-                .iterator()) {
-            if (cursor.hasNext()) {
-                Document doc = cursor.next();
-
-                PageInfo info = new PageInfo();
-                info.setLastCrawlDate(doc.getDate("lastCrawlDate"));
-                info.setState(PageCrawlState.parse(doc.getInteger("state")));
-                if (doc.containsKey("error")) {
-                    info.setError(doc.getString("error"));
-                }
-
-                return info;
-            }
-        }
-
-        return null;
-    }
-
-    @Override
-    public void createPage(String url, PageInfo info) {
-        Document doc = new Document("url", url)
-                .append("lastCrawlDate", info.getLastCrawlDate())
-                .append("state", info.getState());
-
-        pagesInfo.insertOne(doc);
+        sitesPages.replaceOne(
+                Filters.eq("domain", domain),
+                new Document("domain", domain).append("pages", newPages),
+                new UpdateOptions().upsert(true));
     }
 
     @Override
@@ -189,30 +169,9 @@ public class MongoDataProvider implements DataProvider {
 
     @Override
     public void setPageText(String url, String text) {
-        pagesInfo.updateOne(
-                Filters.eq("url", url),
-                new Document("state", PageCrawlState.OK).append("lastCrawlDate", new Date()),
-                new UpdateOptions().upsert(true));
-
-        pagesTexts.updateOne(
+        pagesTexts.replaceOne(
                 Filters.eq("url", url),
                 new Document("url", url).append("text", text),
-                new UpdateOptions().upsert(true));
-    }
-
-    @Override
-    public void setPageError(String url, String error) {
-        pagesInfo.updateOne(
-                Filters.eq("url", url),
-                new Document("error", error),
-                new UpdateOptions().upsert(true));
-    }
-
-    @Override
-    public void setPageState(String url, PageCrawlState state) {
-        pagesInfo.updateOne(
-                Filters.eq("url", url),
-                new Document("state", state.getValue()),
                 new UpdateOptions().upsert(true));
     }
 }

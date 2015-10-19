@@ -1,4 +1,4 @@
-package org.webcache.crawleroverlord;
+package org.webcache.overlord;
 
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
@@ -7,7 +7,7 @@ import org.apache.thrift.server.TThreadPoolServer;
 import org.apache.thrift.transport.TServerSocket;
 import org.apache.thrift.transport.TServerTransport;
 import org.apache.thrift.transport.TTransportException;
-import org.webcache.thrift.Crawler;
+import org.webcache.thrift.Overlord;
 
 /**
  *
@@ -19,8 +19,8 @@ public class Main {
     
     public static void main(String[] args) {
         try {
-            CrawlerService handler = new CrawlerService();
-            Crawler.Processor processor = new Crawler.Processor(handler);
+            OverlordService handler = new OverlordService();
+            Overlord.Processor processor = new Overlord.Processor(handler);
 
             new Thread(() -> {
                 try {

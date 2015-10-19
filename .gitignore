@@ -1,4 +1,5 @@
 /Core/target/
 /.project
-/CrawlerOverlord/target/
+/CrawlerWorker/frontier/
 /CrawlerWorker/target/
+/Overlord/target/
